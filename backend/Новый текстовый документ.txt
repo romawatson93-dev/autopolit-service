@@ -1,0 +1,4 @@
+mkdir "C:\Users\LifePC\Documents\autopolit-service\backend\src\models"
+
+cd "C:\Users\Life PC\Documents\autopolit-service\backend"
+npm run dev
