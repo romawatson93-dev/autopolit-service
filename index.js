@@ -36,12 +36,12 @@ app.use((err, _req, res, _next) => {
 
 // запуск
 (async () => {
-  await testConnectionIfNeeded();           // логика подключения/пропуска внутри config/database.js
+  await testConnectionIfNeeded();           // подключение к БД (можно пропустить SKIP_DB)
   if (sequelize) {
-    await sequelize.sync({ alter: true });  // создаст/обновит таблицы
+    await sequelize.sync({ alter: true });  // миграция схемы
     console.log("Схема БД синхронизирована");
   }
-  app.listen(PORT, () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log("Сервер запущен на порту " + PORT);
     console.log("GET    /ping");
     console.log("GET    /tg/dev-initdata");
