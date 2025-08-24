@@ -1,19 +1,23 @@
 ﻿require("dotenv").config();
 
 const express = require("express");
-const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 
 const { testConnectionIfNeeded, sequelize } = require("./config/database");
 const accessRoutes = require("./routes/accessRoutes");
 
+// NEW: CORS + rate-limit
+const makeCors = require("./middleware/corsAllowlist");
+const { baseLimiter } = require("./middleware/rateLimit");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // middleware
 app.use(helmet());
-app.use(cors());
+app.use(makeCors());                      // CORS с белым списком из .env (CORS_ORIGINS)
+app.use(baseLimiter);                     // общий rate limit
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan("dev"));
@@ -32,16 +36,11 @@ app.use((err, _req, res, _next) => {
 
 // запуск
 (async () => {
-  // 1) проверяем соединение с БД (логика внутри config/database.js)
-  await testConnectionIfNeeded();
-
-  // 2) синхронизируем схему (создаст/обновит таблицы, если БД включена)
+  await testConnectionIfNeeded();           // логика подключения/пропуска внутри config/database.js
   if (sequelize) {
-    await sequelize.sync({ alter: true });
+    await sequelize.sync({ alter: true });  // создаст/обновит таблицы
     console.log("Схема БД синхронизирована");
   }
-
-  // 3) стартуем сервер
   app.listen(PORT, () => {
     console.log("Сервер запущен на порту " + PORT);
     console.log("GET    /ping");
@@ -49,7 +48,9 @@ app.use((err, _req, res, _next) => {
     console.log("POST   /tg");
     console.log("POST   /session/start");
     console.log("POST   /session/refresh");
-    console.log("GET    /viewer/data/:token");
+    console.log("DELETE /session");
+    console.log("DELETE /sessions");
+    console.log("GET    /me");
     console.log("GET    /content/pages/:token");
     console.log("GET    /content/page-svg/:token/:n");
     console.log("GET    /content/page-png/:token/:n (501 пока)");
