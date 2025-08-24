@@ -2,3 +2,17 @@ mkdir "C:\Users\LifePC\Documents\autopolit-service\backend\src\models"
 
 cd "C:\Users\Life PC\Documents\autopolit-service\backend"
 npm run dev
+
+cd "C:\Users\Life PC\Documents\autopolit-service\backend"
+npm run checkpoint
+
+git config --global user.name "roman"
+git config --global user.email "roman8960@yandex.ru"
+
+git remote add origin https://github.com/USERNAME/.git
+git branch -M main
+git push -u origin main
+
+git remote add origin https://github.com/romawatson93-dev/autopolit-service.git
+git branch -M main
+git push -u origin main
