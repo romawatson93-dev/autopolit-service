@@ -1,0 +1,95 @@
+﻿// backend/src/services/sessionService.js
+const { signAccess, signRefresh, verifyToken } = require("./jwt");
+
+// опробуем подтянуть модели (если есть)
+let models = null;
+try {
+  models = require("../models"); // ожидается models.ClientSession / models.ClientDevice
+} catch (_) {
+  models = null;
+}
+
+function ipFromReq(req) {
+  return (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").toString().split(",")[0].trim();
+}
+
+function uaFromReq(req) {
+  return (req.headers["user-agent"] || "").toString();
+}
+
+/**
+ * Создаёт/обновляет клиентскую сессию.
+ * озвращает refresh/access токены. ишет в  при наличии совместимых моделей.
+ */
+async function startSession({ req, client }) {
+  const ip = ipFromReq(req);
+  const ua = uaFromReq(req);
+
+  // азовая полезная нагрузка для токенов
+  const base = {
+    sub: client?.sub || null,
+    tg: client?.tg || null,
+    linkToken: client?.linkToken || null,
+  };
+
+  // енерация токенов
+  const refreshToken = signRefresh(base);
+  const accessToken = signAccess(base);
+
+  // ишем в  (best-effort)
+  if (models?.ClientSession) {
+    try {
+      // универсальный upsert по refreshToken (или по sub+ua)
+      const where = { refreshToken };
+      const defaults = {
+        refreshToken,
+        ip,
+        userAgent: ua,
+        subject: base.sub,
+        linkToken: base.linkToken,
+      };
+      //  разных схемах может не быть upsert → fallback: create
+      if (typeof models.ClientSession.upsert === "function") {
+        await models.ClientSession.upsert({ ...defaults, ...where });
+      } else {
+        await models.ClientSession.create({ ...defaults });
+      }
+    } catch (e) {
+      console.warn("[sessionService] DB write skipped:", e.message);
+    }
+  }
+
+  return { refreshToken, accessToken };
+}
+
+/**
+ * бновляет access по refresh.
+ */
+async function refreshAccess({ refreshToken }) {
+  const v = verifyToken(refreshToken);
+  if (!v.ok) return { ok: false, error: "INVALID_REFRESH" };
+  if (v.data.typ !== "refresh") return { ok: false, error: "NOT_REFRESH_TOKEN" };
+
+  const base = {
+    sub: v.data.sub || null,
+    tg: v.data.tg || null,
+    linkToken: v.data.linkToken || null,
+  };
+
+  // ри желании можно проверять refresh в . елаем best-effort:
+  if (models?.ClientSession) {
+    try {
+      const found = await models.ClientSession.findOne({ where: { refreshToken } });
+      if (!found) {
+        return { ok: false, error: "REFRESH_UNKNOWN" };
+      }
+    } catch (e) {
+      console.warn("[sessionService] DB read skipped:", e.message);
+    }
+  }
+
+  const accessToken = signAccess(base);
+  return { ok: true, accessToken };
+}
+
+module.exports = { startSession, refreshAccess };

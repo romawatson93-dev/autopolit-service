@@ -1,0 +1,57 @@
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const sequelize = require('./config/database');
+const { PORT = 3000 } = process.env;
+
+const app = express();
+
+// Middleware
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// Тестовый маршрут
+app.get('/ping', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Подключаем маршруты авторизации
+const accessRoutes = require('./routes/accessRoutes');
+app.use('/', accessRoutes);
+
+// Подключаем маршруты контент-прокси
+const contentPagesRoutes = require('./routes/contentPagesRoutes');
+app.use('/', contentPagesRoutes);
+
+// Подключаем маршруты для логирования скриншотов
+const screenshotRoutes = require('./routes/screenshotRoutes');
+app.use('/', screenshotRoutes);
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Internal Server Error' });
+});
+
+// Синхронизируем базу и запускаем сервер
+sequelize.sync({ force: false })
+  .then(() => {
+    console.log('База данных синхронизирована');
+    app.listen(PORT, () => {
+      console.log(`Сервер запущен на порту ${PORT}`);
+      console.log('Доступные эндпоинты:');
+      console.log('  GET    /ping');
+      console.log('  POST   /open/tg');
+      console.log('  GET    /open/tg/dev-initdata');
+      console.log('  POST   /open/session/start');
+      console.log('  POST   /open/session/refresh');
+      console.log('  GET    /open/viewer/data/:token');
+      console.log('  GET    /open/content/pages/:token');
+      console.log('  POST   /open/viewer/screenshot');
+    });
+  })
+  .catch(err => {
+    console.error('Ошибка подключения к базе данных:', err);
+  });

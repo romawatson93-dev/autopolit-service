@@ -1,0 +1,89 @@
+﻿// backend/src/utils/telegram.js
+const crypto = require("crypto");
+
+function parseInitData(initData) {
+  const params = new URLSearchParams(initData);
+  const obj = {};
+  for (const [k, v] of params.entries()) obj[k] = v;
+  return obj;
+}
+
+function buildDataCheckString(obj) {
+  const pairs = Object.entries(obj)
+    .filter(([k]) => k !== "hash")
+    .map(([k, v]) => `${k}=${v}`)
+    .sort();
+  return pairs.join("\n");
+}
+
+function hmacHex(secretKeyBuf, data) {
+  return require("crypto")
+    .createHmac("sha256", secretKeyBuf)
+    .update(data)
+    .digest("hex");
+}
+
+function verifyTelegramInitData(initData, botToken, maxAgeSec = 86400) {
+  if (!initData || typeof initData !== "string") {
+    return { ok: false, reason: "NO_INIT_DATA" };
+  }
+  if (!botToken) {
+    return { ok: false, reason: "NO_BOT_TOKEN" };
+  }
+
+  let parsed;
+  try {
+    parsed = parseInitData(initData);
+  } catch {
+    return { ok: false, reason: "PARSE_ERROR" };
+  }
+
+  const providedHash = parsed.hash;
+  if (!providedHash) return { ok: false, reason: "NO_HASH" };
+
+  const checkString = buildDataCheckString(parsed);
+  const secretKey = crypto.createHash("sha256").update(botToken).digest();
+  const expectedHash = hmacHex(secretKey, checkString);
+
+  if (expectedHash !== providedHash) {
+    return { ok: false, reason: "HASH_MISMATCH" };
+  }
+
+  const authDate = Number(parsed.auth_date || 0);
+  if (!authDate || Number.isNaN(authDate)) {
+    return { ok: false, reason: "NO_AUTH_DATE" };
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (nowSec - authDate > maxAgeSec) {
+    return { ok: false, reason: "EXPIRED" };
+  }
+
+  let user = null;
+  if (parsed.user) {
+    try {
+      user = JSON.parse(parsed.user);
+    } catch {
+      user = null;
+    }
+  }
+
+  return { ok: true, data: parsed, user, auth_date: authDate };
+}
+
+/** DEV ONLY — генерация корректного initData для локального теста */
+function signInitData(fields, botToken) {
+  const secretKey = crypto.createHash("sha256").update(botToken).digest();
+  const prepared = { ...fields };
+  if (prepared.user && typeof prepared.user !== "string") {
+    prepared.user = JSON.stringify(prepared.user);
+  }
+  const checkString = buildDataCheckString(prepared);
+  const hash = hmacHex(secretKey, checkString);
+  const params = new URLSearchParams({ ...prepared, hash });
+  return params.toString();
+}
+
+module.exports = {
+  verifyTelegramInitData,
+  signInitData,
+};

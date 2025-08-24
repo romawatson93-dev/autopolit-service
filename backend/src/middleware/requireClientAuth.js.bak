@@ -1,0 +1,43 @@
+﻿// backend/src/middleware/requireClientAuth.js
+const jwt = require("jsonwebtoken");
+
+function pickAccessToken(req) {
+  // 1) Authorization: Bearer xxx
+  let h = req.headers?.authorization || req.headers?.Authorization;
+  if (typeof h === "string" && h.toLowerCase().startsWith("bearer ")) {
+    return h.slice(7).trim();
+  }
+  // 2) X-Access-Token
+  if (typeof req.headers?.["x-access-token"] === "string") {
+    return req.headers["x-access-token"].trim();
+  }
+  // 3) query ?at=xxx (на случай кривых клиентов / отладки)
+  if (typeof req.query?.at === "string" && req.query.at.trim().length > 0) {
+    return req.query.at.trim();
+  }
+  return null;
+}
+
+module.exports = function requireClientAuth(req, res, next) {
+  try {
+    const token = pickAccessToken(req);
+    if (!token) {
+      return res.status(401).json({ ok: false, error: "NOT_ACCESS_TOKEN" });
+    }
+    let payload;
+    try {
+      payload = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (e) {
+      return res.status(401).json({ ok: false, error: e.name || "INVALID_TOKEN" });
+    }
+    // тип клиента
+    if (payload?.typ !== "client") {
+      return res.status(401).json({ ok: false, error: "NOT_CLIENT_TOKEN" });
+    }
+    req.user = payload;
+    return next();
+  } catch (e) {
+    console.error("requireClientAuth error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+};

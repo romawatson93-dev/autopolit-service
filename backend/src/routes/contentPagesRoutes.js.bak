@@ -1,0 +1,54 @@
+const express = require('express');
+const router = express.Router();
+const { authenticateViewerSession } = require('../middleware/auth');
+const ContentService = require('../services/ContentService');
+
+/**
+ * олучение списка страниц документа
+ * GET /open/content/pages/:token
+ */
+router.get('/content/pages/:token', authenticateViewerSession, async (req, res) => {
+  try {
+    const { token } = req.params;
+    const mode = req.query.mode || 'raster';
+    
+    // роверяем, есть ли доступ через сессию
+    if (!req.viewerSession || req.viewerSession.linkToken !== token) {
+      return res.status(403).json({ 
+        ok: false,
+        error: 'ACCESS_DENIED',
+        message: 'оступ запрещен: несоответствие токена сессии' 
+      });
+    }
+    
+    // олучаем информацию о страницах
+    const pagesInfo = await ContentService.getPagesInfo(token, mode);
+    
+    // ормируем URL относительно публичной директории (С: СЬ ТЫ Ы!)
+    const baseUrl = /storage/public//;
+    const pages = pagesInfo.map((page, index) => ({
+      page: index + 1,
+      url: ${baseUrl}/.png,
+      width: page.width,
+      height: page.height
+    }));
+    
+    res.json({
+      ok: true,
+      token: token,
+      mode: mode,
+      pages: pages,
+      total: pages.length
+    });
+    
+  } catch (error) {
+    console.error('шибка получения списка страниц:', error);
+    res.status(500).json({ 
+      ok: false,
+      error: 'SERVER_ERROR',
+      message: 'шибка сервера при получении списка страниц'
+    });
+  }
+});
+
+module.exports = router;

@@ -1,0 +1,124 @@
+﻿<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>ащищённый просмотр</title>
+  <style>
+    html,body { margin:0; padding:0; height:100%; background:#111; color:#eee; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .wrap { position:relative; width:100%; height:100%; overflow:hidden; }
+    .toolbar { position:fixed; top:0; left:0; right:0; height:44px; display:flex; align-items:center; gap:8px; padding:0 12px; background:#151515; border-bottom:1px solid #222; z-index:10; }
+    .title { font-size:14px; opacity:.9; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .content { position:absolute; top:44px; left:0; right:0; bottom:0; overflow:auto; -webkit-user-select:none; user-select:none; }
+    /* асим любые события мыши на картинках (нет drag) */
+    .content img, .content canvas { pointer-events:none; -webkit-user-drag:none; }
+    /* олноэкранный чёрный оверлей */
+    .blackout { position:absolute; inset:44px 0 0 0; background:#000; display:none; z-index:20; }
+    .toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); padding:10px 14px; background:#222; color:#fff; border:1px solid #333; border-radius:8px; font-size:13px; display:none; z-index:30; }
+    /* тключаем выделение и контекстное меню глобально */
+    * { -webkit-user-select: none; user-select: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="app">
+    <div class="toolbar">
+      <div class="title" id="docTitle">агружается…</div>
+    </div>
+    <div class="content" id="content"></div>
+    <div class="blackout" id="blackout"></div>
+    <div class="toast" id="toast">Сделан скриншот</div>
+  </div>
+
+  <script>
+    // ====== тилиты
+    const $ = (s)=>document.querySelector(s);
+    const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+
+    // Токен берём из пути: /open/:token
+    const token = (location.pathname.split("/open/")[1]||"").split(/[/?#]/)[0];
+
+    // ====== локировки UX
+    // 1) апрет контекстного меню
+    window.addEventListener("contextmenu", (e)=> e.preventDefault(), {capture:true});
+    // 2) апрет перетаскивания
+    window.addEventListener("dragstart", (e)=> e.preventDefault(), {capture:true});
+    // 3) апрет копирования/выделения
+    window.addEventListener("copy", (e)=> e.preventDefault(), {capture:true});
+    window.addEventListener("cut", (e)=> e.preventDefault(), {capture:true});
+    window.addEventListener("selectstart", (e)=> e.preventDefault(), {capture:true});
+
+    // 4) орячие клавиши: PrintScreen/Ctrl+S/P/U/Cmd+...
+    function isPrintScreen(evt){
+      // Windows/Linux
+      if (evt.key === "PrintScreen") return true;
+      // macOS — часть сочетаний скрина: Cmd+Shift+3/4/5
+      if (evt.metaKey && evt.shiftKey && ["3","4","5"].includes(evt.key)) return true;
+      return false;
+    }
+    function isSaveOrPrint(evt){
+      const k = evt.key.toLowerCase();
+      if ((evt.ctrlKey || evt.metaKey) && ["s","p","u"].includes(k)) return true;
+      return false;
+    }
+
+    function showToast(msg="Сделан скриншот"){ const t=$("#toast"); t.textContent=msg; t.style.display="block"; setTimeout(()=> t.style.display="none", 2000); }
+    function blackoutOn(){ $("#blackout").style.display="block"; }
+    function blackoutOff(){ $("#blackout").style.display="none"; }
+
+    async function reportScreenshot(reason, meta){
+      try{
+        // NB: access-token кладём в Authorization заголовке; MiniApp уже его имеет в runtime
+        await fetch("/open/viewer/screenshot", {
+          method:"POST",
+          headers: { "Content-Type":"application/json" },
+          body: JSON.stringify({ token, reason, meta })
+        });
+      }catch(_){}
+    }
+
+    async function handleScreenshot(reason, meta){
+      blackoutOn();
+      showToast("Сделан скриншот");
+      reportScreenshot(reason, meta);
+    }
+
+    window.addEventListener("keydown", (e)=>{
+      if (isPrintScreen(e) || isSaveOrPrint(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleScreenshot(isPrintScreen(e) ? "printscreen" : "save/print", { key:e.key, ctrl:e.ctrlKey, meta:e.metaKey });
+      }
+    }, {capture:true});
+
+    // 5) visibilitychange/blur — считаем потенциальной попыткой
+    document.addEventListener("visibilitychange", ()=>{
+      if (document.visibilityState === "hidden") {
+        handleScreenshot("visibility_hidden", {});
+      }
+    });
+
+    window.addEventListener("blur", ()=>{
+      // окно ушло в фон — на ряде систем это происходит при системном скрине
+      handleScreenshot("window_blur", {});
+    });
+
+    // ====== агрузка данных viewer
+    async function loadData(){
+      const resp = await fetch(`/open/viewer/data/${encodeURIComponent(token)}`, { method:"GET" });
+      const data = await resp.json();
+      if(!data?.ok){ $("#docTitle").textContent = "ет доступа"; return; }
+      $("#docTitle").textContent = data?.link?.title || ("окумент " + (data?.link?.id??""));
+      // десь должен быть рендер контента в <canvas> / <img>. ока — заглушка:
+      const c = $("#content");
+      c.innerHTML = "";
+      const stub = document.createElement("div");
+      stub.style.cssText = "height:100%;display:flex;align-items:center;justify-content:center;color:#888;";
+      stub.textContent = "онтент загружается…";
+      c.appendChild(stub);
+      // TODO: подставим реальные изображения страниц / canvas‑рендер PDF
+    }
+
+    loadData();
+  </script>
+</body>
+</html>

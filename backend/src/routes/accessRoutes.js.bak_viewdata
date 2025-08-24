@@ -1,0 +1,135 @@
+﻿// backend/src/routes/accessRoutes.js
+const express = require("express");
+const { verifyTelegramInitData, signInitData } = require("../utils/telegram");
+const { signAccess } = require("../services/jwt");
+const requireClientAuth = require("../middleware/requireClientAuth");
+const { startSession, refreshAccess } = require("../services/sessionService");
+
+const router = express.Router();
+
+/**
+ * POST /tg  (монтируется на /open → /open/tg)
+ * Body: { initData: string, token?: string }
+ * озвращает access-токен (typ=access) на 15 минут.
+ */
+router.post("/tg", async (req, res) => { console.log("[/tg] headers:", req.headers); console.log("[/tg] typeof body:", typeof req.body, "body:", req.body);
+  try {
+    const { initData, token: linkToken } = req.body || {};
+    const maxAge = Number(process.env.TG_INITDATA_MAX_AGE || 86400);
+    const botToken = process.env.BOT_TOKEN;
+
+    const vr = verifyTelegramInitData(initData, botToken, maxAge);
+    if (!vr.ok) {
+      return res.status(401).json({ ok: false, error: vr.reason });
+    }
+
+    const tgUser = vr.user || null;
+
+    const accessToken = signAccess({
+      sub: tgUser ? `tg:${tgUser.id}` : null,
+      tg: tgUser
+        ? {
+            id: tgUser.id,
+            username: tgUser.username,
+            first_name: tgUser.first_name,
+            last_name: tgUser.last_name,
+            language_code: tgUser.language_code,
+            is_premium: tgUser.is_premium,
+          }
+        : null,
+      linkToken: linkToken || null,
+    });
+
+    return res.json({ ok: true, accessToken, expiresIn: 900, tgUser });
+  } catch (err) {
+    console.error("POST /tg error:", err);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/**
+ * DEV ONLY: GET /tg/dev-initdata  (итог: /open/tg/dev-initdata)
+ */
+if (process.env.NODE_ENV !== "production") {
+  router.get("/tg/dev-initdata", (req, res) => {
+    const botToken = process.env.BOT_TOKEN;
+    if (!botToken) return res.status(400).json({ ok: false, error: "NO_BOT_TOKEN" });
+
+    const now = Math.floor(Date.now() / 1000);
+    const user = {
+      id: Number(req.query.user_id || 11111111),
+      username: req.query.username || "demo_user",
+      first_name: req.query.first_name || "Demo",
+      last_name: req.query.last_name || "",
+      language_code: "en",
+      is_premium: false,
+    };
+
+    const fields = {
+      auth_date: String(now),
+      query_id: req.query.query_id || "AAH_test_query_id",
+      user,
+    };
+
+    const initData = signInitData(fields, botToken);
+    return res.json({ ok: true, initData, note: "Use this initData in POST /open/tg for local testing" });
+  });
+}
+
+/* ===== Client Session routes ===== */
+
+/**
+ * POST /session/start  (итог: /open/session/start)
+ * Требует Authorization: Bearer <access>
+ * озвращает: { refreshToken, accessToken }
+ */
+router.post("/session/start", requireClientAuth, async (req, res) => {
+  try {
+    const { refreshToken, accessToken } = await startSession({ req, client: req.client });
+    return res.json({ ok: true, refreshToken, accessToken });
+  } catch (e) {
+    console.error("POST /session/start error:", e);
+    res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/**
+ * POST /session/refresh  (итог: /open/session/refresh)
+ * Body: { refreshToken } → { accessToken }
+ */
+router.post("/session/refresh", async (req, res) => {
+  try {
+    const { refreshToken } = req.body || {};
+    const out = await refreshAccess({ refreshToken });
+    if (!out.ok) return res.status(401).json({ ok: false, error: out.error });
+    return res.json({ ok: true, accessToken: out.accessToken });
+  } catch (e) {
+    console.error("POST /session/refresh error:", e);
+    res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/* ===== Viewer protected data ===== */
+/**
+ * GET /viewer/data/:token  → итоговый путь: /open/viewer/data/:token
+ * Требует Authorization: Bearer <access>
+ * озвращает базовые данные клиента и токен ссылки (заглушка).
+ */
+router.get("/viewer/data/:token", requireClientAuth, async (req, res) => {
+  try {
+    const token = req.params.token;
+    // TODO: найти ссылку в , проверить доступ и вернуть payload для viewer
+    return res.json({
+      ok: true,
+      token,
+      client: req.client,
+      now: Date.now(),
+    });
+  } catch (e) {
+    console.error("GET /viewer/data error:", e);
+    res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+module.exports = router;
+

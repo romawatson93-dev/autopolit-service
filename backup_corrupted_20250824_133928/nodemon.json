@@ -1,0 +1,5 @@
+﻿{
+  "watch": ["index.js", "routes", "services", "utils", "middleware", "config"],
+  "ext": "js,json",
+  "ignore": [".env", "package-lock.json", "node_modules"]
+}

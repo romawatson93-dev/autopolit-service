@@ -1,0 +1,145 @@
+﻿<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Autopolit Viewer</title>
+  <style>
+    html,body { margin:0; padding:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b0c10; color:#eaeef2; }
+    .wrap { max-width:840px; margin:0 auto; padding:24px; }
+    .card { background:#111316; border:1px solid #1f2329; border-radius:16px; padding:20px; box-shadow:0 4px 16px rgba(0,0,0,.25); }
+    .muted { color:#9aa4af; font-size:12px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+    button { border-radius:10px; border:1px solid #2a2f36; padding:10px 14px; background:#161a20; color:#eaeef2; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .ok { color:#6ee7a3; }
+    .err { color:#fca5a5; }
+    .tag { display:inline-block; padding:2px 8px; border:1px solid #2a2f36; border-radius:999px; font-size:12px; color:#cbd5e1; }
+  </style>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h2>ащищённый просмотр</h2>
+    <div class="card" id="log"></div>
+    <div class="card" style="margin-top:16px">
+      <div class="row"><span class="tag">Token</span><span id="linkToken" class="mono"></span></div>
+      <div class="row" style="margin-top:8px"><span class="tag">Client</span><span id="clientInfo" class="mono"></span></div>
+      <div style="margin-top:12px" class="muted">та страница автоматически авторизуется через Telegram WebApp (или Web‑OTP в будущем), создаёт клиентскую сессию и запрашивает защищённые данные ссылки.</div>
+      <div style="margin-top:12px" class="row">
+        <button id="btnRefresh">бновить access по refresh</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const linkTokenEl = document.getElementById('linkToken');
+    const clientInfoEl = document.getElementById('clientInfo');
+    const btnRefresh = document.getElementById('btnRefresh');
+
+    function log(msg, cls) {
+      const p = document.createElement('div');
+      p.innerHTML = msg;
+      if (cls) p.className = cls;
+      logEl.appendChild(p);
+    }
+
+    function getLinkToken() {
+      // Токен берём из URL: /open/:token
+      const m = location.pathname.match(/\/open\/([^\/?#]+)/);
+      return m ? decodeURIComponent(m[1]) : null;
+    }
+
+    function getAccess() { return localStorage.getItem('client_access_token') || ''; }
+    function setAccess(t) { localStorage.setItem('client_access_token', t); }
+    function getRefresh() { return localStorage.getItem('client_refresh_token') || ''; }
+    function setRefresh(t) { localStorage.setItem('client_refresh_token', t); }
+
+    async function authViaTelegram(linkToken) {
+      const initData = window.Telegram?.WebApp?.initData || '';
+      if (!initData) {
+        log('⚠️ Telegram initData пустой. ткрыто не из Mini App? вторизация может не пройти.', 'err');
+      }
+      const resp = await fetch('/open/tg', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData, token: linkToken })
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error('TG auth failed: ' + data.error);
+      setAccess(data.accessToken);
+      log('✔ TG auth ok — получен access (15 мин).', 'ok');
+      return data;
+    }
+
+    async function sessionStart() {
+      const resp = await fetch('/open/session/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getAccess() },
+        body: '{}'
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error('session/start failed: ' + data.error);
+      setRefresh(data.refreshToken);
+      setAccess(data.accessToken);
+      log('✔ session/start ok — получены refresh + новый access.', 'ok');
+      return data;
+    }
+
+    async function loadViewerData(linkToken) {
+      const resp = await fetch('/open/viewer/data/' + encodeURIComponent(linkToken), {
+        headers: { 'Authorization': 'Bearer ' + getAccess() }
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error('viewer/data failed: ' + data.error);
+      clientInfoEl.textContent = JSON.stringify({ sub: data.client?.sub, tg: data.client?.tg?.username }, null, 0);
+      log('✔ viewer/data загружены.', 'ok');
+      return data;
+    }
+
+    async function refreshAccess() {
+      const body = JSON.stringify({ refreshToken: getRefresh() });
+      const resp = await fetch('/open/session/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error('refresh failed: ' + data.error);
+      setAccess(data.accessToken);
+      log('✔ access обновлён по refresh.', 'ok');
+      return data;
+    }
+
+    async function main() {
+      const linkToken = getLinkToken();
+      linkTokenEl.textContent = linkToken || '(нет токена в URL)';
+      try {
+        // 1) ервичный access (через TG)
+        await authViaTelegram(linkToken);
+        // 2) Старт сессии → refresh + новый access
+        await sessionStart();
+        // 3) ёргаем защищённые данные
+        const data = await loadViewerData(linkToken);
+        log('отово. анные: <span class="mono">' + JSON.stringify(data) + '</span>');
+      } catch (e) {
+        log('❌ шибка: ' + e.message, 'err');
+      }
+    }
+
+    btnRefresh.addEventListener('click', async () => {
+      try {
+        await refreshAccess();
+        log('овторная загрузка данных...');
+        await loadViewerData(getLinkToken());
+      } catch (e) {
+        log('❌ ' + e.message, 'err');
+      }
+    });
+
+    main();
+  </script>
+</body>
+</html>

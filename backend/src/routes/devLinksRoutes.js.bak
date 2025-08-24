@@ -1,0 +1,60 @@
+﻿// backend/src/routes/devLinksRoutes.js
+const express = require("express");
+const crypto = require("crypto");
+let models = null;
+try { models = require("../models"); } catch (_) { models = null; }
+
+const router = express.Router();
+
+function genToken(n = 24) {
+  return crypto.randomBytes(n).toString("base64url");
+}
+
+router.post("/create", async (req, res) => {
+  try {
+    if (!models?.Link) {
+      return res.status(500).json({ ok: false, error: "NO_LINK_MODEL" });
+    }
+    const Link = models.Link;
+
+    const body = req.body || {};
+    const url = body.targetUrl || body.url || body.link || null;
+    const expires = body.expiresAt || body.expireAt || null;
+    const maxOpens = body.maxOpens ?? body.openLimit ?? body.limit ?? null;
+
+    const token = body.token || genToken(16);
+
+    // Соберём пэйлоад «best-effort» под разные схемы 
+    const payloadCandidates = [
+      { token, url, expiresAt: expires, maxOpens, opensCount: 0, title: body.title || null },
+      { slug: token, targetUrl: url, expireAt: expires, openLimit: maxOpens, openCount: 0, name: body.title || null },
+      { accessToken: token, url, expires, maxOpens, views: 0, title: body.title || null },
+    ];
+
+    let created = null, lastErr = null;
+    for (const p of payloadCandidates) {
+      try {
+        created = await Link.create(p);
+        if (created) break;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+    if (!created) {
+      return res.status(400).json({ ok: false, error: "CREATE_FAILED", details: lastErr?.message });
+    }
+
+    const obj = created.get ? created.get() : created;
+    // остаём реальное поле токена
+    const tokenOut = obj.token || obj.slug || obj.accessToken || token;
+    const base = process.env.APP_URL || "http://localhost:3000";
+    const fullUrl = `${base}/open/${encodeURIComponent(tokenOut)}`;
+
+    return res.json({ ok: true, id: obj.id, token: tokenOut, fullUrl, link: obj });
+  } catch (e) {
+    console.error("[dev-links] create error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL", details: e.message });
+  }
+});
+
+module.exports = router;

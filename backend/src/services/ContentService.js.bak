@@ -1,0 +1,80 @@
+const fs = require('fs');
+const path = require('path');
+const { Link } = require('../models');
+
+class ContentService {
+  static STORAGE_PUBLIC = path.join(__dirname, '..', 'storage', 'public');
+  
+  /**
+   * олучение информации о страницах документа
+   * @param {string} token - Токен ссылки
+   * @param {string} mode - ежим (raster/vector)
+   * @returns {Array} - ассив информации о страницах
+   */
+  static async getPagesInfo(token, mode = 'raster') {
+    try {
+      // аходим ссылку по токену
+      const link = await Link.findOne({ where: { token } });
+      if (!link) {
+        throw new Error('Ссылка не найдена');
+      }
+
+      // роверяем путь к растре
+      const rasterDir = path.join(this.STORAGE_PUBLIC, token, mode);
+      if (!fs.existsSync(rasterDir)) {
+        // сли папки нет, возможно нужно сгенерировать страницы
+        await this.generatePages(token);
+      }
+
+      // олучаем список файлов в директории
+      const files = fs.readdirSync(rasterDir)
+        .filter(file => file.endsWith('.png'))
+        .sort((a, b) => parseInt(path.basename(a, '.png')) - parseInt(path.basename(b, '.png')));
+      
+      // озвращаем информацию о страницах
+      return files.map((file, index) => ({
+        width: 1200,
+        height: 1600
+      }));
+      
+    } catch (error) {
+      console.error('шибка получения информации о страницах:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * енерация страниц из PDF (если ещё не сгенерировано)
+   * @param {string} token - Токен ссылки
+   */
+  static async generatePages(token) {
+    try {
+      const link = await Link.findOne({ where: { token } });
+      if (!link) throw new Error('Ссылка не найдена');
+      
+      const sourcePath = path.join(__dirname, '..', 'storage', 'source', ${token}.pdf);
+      const publicPath = path.join(this.STORAGE_PUBLIC, token, 'raster');
+      
+      if (!fs.existsSync(sourcePath)) {
+        throw new Error('сходный PDF не найден');
+      }
+      
+      // Создаем директорию для растре
+      if (!fs.existsSync(publicPath)) {
+        fs.mkdirSync(publicPath, { recursive: true });
+      }
+      
+      // десь должна быть логика конвертации PDF в изображения
+      console.log(енерация страниц для токена: );
+      
+      //  реальной реализации используйте библиотеку для конвертации PDF
+      // апример: pdf2pic, pdf-lib, или другие
+      
+    } catch (error) {
+      console.error('шибка генерации страниц:', error);
+      throw error;
+    }
+  }
+}
+
+module.exports = ContentService;

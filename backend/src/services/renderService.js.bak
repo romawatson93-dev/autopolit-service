@@ -1,0 +1,110 @@
+﻿// backend/src/services/renderService.js
+const fs = require("fs");
+const fsp = require("fs/promises");
+const path = require("path");
+const { execFile } = require("child_process");
+
+// бсолютные пути к poppler (Windows)
+const POPPLER_BIN = "C:\\tools\\poppler\\poppler-25.07.0\\Library\\bin";
+const PDFTOPPM = path.join(POPPLER_BIN, "pdftoppm.exe");
+const PDFINFO  = path.join(POPPLER_BIN, "pdfinfo.exe");
+// pdf2svg на Windows нет → векторный режим отключён
+const PDF2SVG  = null;
+
+const SRC_DIR = process.env.RENDER_SRC_DIR || path.join(process.cwd(), "storage", "source");
+const OUT_DIR = process.env.RENDER_OUT_DIR || path.join(process.cwd(), "storage", "public");
+const RASTER_DPI = Number(process.env.RENDER_RASTER_DPI || 220);
+
+function run(cmd, args, opts={}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, opts, (err, stdout, stderr) => {
+      if (err) return reject(Object.assign(err, { stdout, stderr }));
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function sourcePdfPath(token) {
+  return path.join(SRC_DIR, `${token}.pdf`);
+}
+function outDir(token, mode) {
+  return path.join(OUT_DIR, token, mode);
+}
+
+async function fileExists(p) {
+  try { await fsp.access(p, fs.constants.R_OK); return true; } catch { return false; }
+}
+async function ensureDirs(p) { await fsp.mkdir(p, { recursive: true }); }
+
+async function getPdfPagesCount(pdfPath) {
+  const { stdout } = await run(PDFINFO, [pdfPath]);
+  const m = stdout.match(/Pages:\s+(\\d+)/i);
+  const count = m ? parseInt(m[1], 10) : 1;
+  return Math.max(count, 1);
+}
+
+// ===== RASTER (PNG) =====
+async function renderRaster(token) {
+  const pdfPath = sourcePdfPath(token);
+  if (!await fileExists(pdfPath)) {
+    const e = new Error("PDF_SOURCE_NOT_FOUND");
+    e.code = "PDF_SOURCE_NOT_FOUND";
+    throw e;
+  }
+  const out = outDir(token, "raster");
+  await ensureDirs(out);
+  const pages = await getPdfPagesCount(pdfPath);
+
+  const outPrefix = path.join(out, "page");
+  await run(PDFTOPPM, ["-png", "-r", String(RASTER_DPI), "-f", "1", "-l", String(pages), pdfPath, outPrefix]);
+
+  for (let n=1; n<=pages; n++) {
+    const src = path.join(out, `page-${n}.png`);
+    const dst = path.join(out, `${n}.png`);
+    try { await fsp.rename(src, dst); } catch {}
+  }
+  return { pages, dir: out };
+}
+
+// ===== VECTOR (SVG) =====
+async function renderVector() {
+  const e = new Error("VECTOR_RENDERER_NOT_AVAILABLE");
+  e.code = "VECTOR_RENDERER_NOT_AVAILABLE";
+  throw e;
+}
+
+async function ensureRendered(token, mode) {
+  const out = outDir(token, mode);
+  if (!await fileExists(out)) await ensureDirs(out);
+
+  const already = (await fsp.readdir(out).catch(()=>[])).filter(f => {
+    return mode === "raster" ? f.endsWith(".png") : f.endsWith(".svg");
+  });
+
+  if (already.length > 0) {
+    const nums = already.map(f => parseInt(path.basename(f, path.extname(f)), 10)).filter(Boolean);
+    const pages = nums.length ? Math.max(...nums) : 1;
+    return { ok: true, pages, dir: out };
+  }
+  try {
+    const res = mode === "vector" ? await renderVector(token) : await renderRaster(token);
+    return { ok: true, pages: res.pages, dir: res.dir };
+  } catch (e) {
+    if (e.code === "PDF_SOURCE_NOT_FOUND") return { ok:false, error:"PDF_SOURCE_NOT_FOUND" };
+    if (e.code === "VECTOR_RENDERER_NOT_AVAILABLE") return { ok:false, error:"VECTOR_RENDERER_NOT_AVAILABLE" };
+    return { ok:false, error: e.message || "RENDER_FAILED" };
+  }
+}
+
+async function listPages(token, mode) {
+  const base = outDir(token, mode);
+  const files = (await fsp.readdir(base).catch(()=>[]))
+    .filter(f => mode === "raster" ? f.endsWith(".png") : f.endsWith(".svg"))
+    .sort((a,b)=> parseInt(a) - parseInt(b));
+  return files.map(f => ({
+    n: parseInt(path.basename(f, path.extname(f)), 10),
+    file: path.join(base, f)
+  })).filter(x => Number.isFinite(x.n));
+}
+
+module.exports = { ensureRendered, listPages, sourcePdfPath, outDir };

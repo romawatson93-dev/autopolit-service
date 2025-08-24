@@ -1,0 +1,156 @@
+﻿// backend/src/routes/accessRoutes.js
+const express = require("express");
+const { verifyTelegramInitData, signInitData } = require("../utils/telegram");
+const { signAccess } = require("../services/jwt");
+const requireClientAuth = require("../middleware/requireClientAuth");
+const { startSession, refreshAccess } = require("../services/sessionService");
+const { findLinkByToken, checkAccess, bumpOpenCounter, writeOpenEvent } = require("../services/linkService");
+
+const router = express.Router();
+
+// ✅ ВКЛЮЧАЕМ явный dev‑fallback:
+// - если NODE_ENV != production ИЛИ VIEWER_ALLOW_MISSING=1, то отдаём мок вместо 404
+const ALLOW_MISSING = (process.env.NODE_ENV !== "production") || (process.env.VIEWER_ALLOW_MISSING === "1");
+
+/**
+ * POST /tg  (монтируется на /open → /open/tg)
+ */
+router.post("/tg", async (req, res) => {
+  try {
+    const { initData, token: linkToken } = req.body || {};
+    const maxAge = Number(process.env.TG_INITDATA_MAX_AGE || 86400);
+    const botToken = process.env.BOT_TOKEN;
+
+    const vr = verifyTelegramInitData(initData, botToken, maxAge);
+    if (!vr.ok) return res.status(401).json({ ok: false, error: vr.reason });
+
+    const tgUser = vr.user || null;
+
+    const accessToken = signAccess({
+      sub: tgUser ? `tg:${tgUser.id}` : null,
+      tg: tgUser ? {
+        id: tgUser.id,
+        username: tgUser.username,
+        first_name: tgUser.first_name,
+        last_name: tgUser.last_name,
+        language_code: tgUser.language_code,
+        is_premium: tgUser.is_premium,
+      } : null,
+      linkToken: linkToken || null,
+    });
+
+    return res.json({ ok: true, accessToken, expiresIn: 900, tgUser });
+  } catch (err) {
+    console.error("POST /tg error:", err);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/**
+ * DEV ONLY: GET /tg/dev-initdata  (итог: /open/tg/dev-initdata)
+ */
+if (process.env.NODE_ENV !== "production") {
+  router.get("/tg/dev-initdata", (req, res) => {
+    try {
+      const botToken = process.env.BOT_TOKEN;
+      if (!botToken) return res.status(400).json({ ok: false, error: "NO_BOT_TOKEN" });
+
+      const now = Math.floor(Date.now() / 1000);
+      const user = {
+        id: Number(req.query.user_id || 11111111),
+        username: req.query.username || "demo_user",
+        first_name: req.query.first_name || "Demo",
+        last_name: req.query.last_name || "",
+        language_code: "en",
+        is_premium: false,
+      };
+
+      const fields = { auth_date: String(now), query_id: req.query.query_id || "AAH_test_query_id", user };
+      const initData = signInitData(fields, botToken);
+      return res.json({ ok: true, initData, note: "Use this initData in POST /open/tg for local testing" });
+    } catch (e) {
+      console.error("GET /tg/dev-initdata error:", e);
+      return res.status(500).json({ ok: false, error: "INTERNAL" });
+    }
+  });
+}
+
+/* ===== Client Session ===== */
+router.post("/session/start", requireClientAuth, async (req, res) => {
+  try {
+    const { refreshToken, accessToken } = await startSession({ req, client: req.client });
+    return res.json({ ok: true, refreshToken, accessToken });
+  } catch (e) {
+    console.error("POST /session/start error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+router.post("/session/refresh", async (req, res) => {
+  try {
+    const { refreshToken } = req.body || {};
+    const out = await refreshAccess({ refreshToken });
+    if (!out.ok) return res.status(401).json({ ok: false, error: out.error });
+    return res.json({ ok: true, accessToken: out.accessToken });
+  } catch (e) {
+    console.error("POST /session/refresh error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/* ===== Viewer data (с dev‑fallback) ===== */
+router.get("/viewer/data/:token", requireClientAuth, async (req, res) => {
+  const token = req.params.token;
+  try {
+    const found = await findLinkByToken(token);
+
+    if (!found.ok) {
+      if (ALLOW_MISSING) {
+        return res.json({
+          ok: true,
+          token,
+          client: { sub: req.client?.sub, tg: req.client?.tg, linkToken: req.client?.linkToken },
+          link: { id: null, title: "(dev mock)", url: null, contentType: null, token },
+          now: Date.now(),
+          note: "DEV_FALLBACK_NO_LINK"
+        });
+      }
+      await writeOpenEvent({ req, link: null, status: "NOT_FOUND", error: found.reason });
+      return res.status(404).json({ ok: false, error: "LINK_NOT_FOUND" });
+    }
+
+    const link = found.link;
+
+    const chk = checkAccess(link);
+    if (!chk.ok) {
+      await writeOpenEvent({ req, link, status: "DENY", error: chk.reason });
+      return res.status(403).json({ ok: false, error: chk.reason });
+    }
+
+    await bumpOpenCounter(link);
+    await writeOpenEvent({ req, link, status: "OK" });
+
+    const L = link.get ? link.get() : link;
+    const payload = {
+      id: L.id,
+      title: L.title || L.name || null,
+      url: L.url || L.targetUrl || null,
+      contentType: L.contentType || null,
+      token,
+    };
+
+    return res.json({
+      ok: true,
+      token,
+      client: { sub: req.client?.sub, tg: req.client?.tg, linkToken: req.client?.linkToken },
+      link: payload,
+      now: Date.now(),
+    });
+  } catch (e) {
+    console.error("GET /viewer/data error:", e);
+    try { await writeOpenEvent({ req, link: null, status: "ERROR", error: e.message }); } catch {}
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+module.exports = router;

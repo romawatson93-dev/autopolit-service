@@ -1,0 +1,142 @@
+﻿// backend/src/services/linkService.js
+
+// ытаемся подтянуть sequelize-модели; если их нет/они отличаются — не падаем
+let models = null;
+try { models = require("../models"); } catch (_) { models = null; }
+
+function ipFromReq(req) {
+  return (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "")
+    .toString().split(",")[0].trim();
+}
+
+function uaFromReq(req) {
+  return (req.headers["user-agent"] || "").toString();
+}
+
+/**
+ * аходит ссылку по токену. оддерживает разные схемы:
+ * - models.Link с полями token/slug и expiresAt/maxOpens/opensCount/url/title
+ * озвращает { ok, link|null, reason? }
+ */
+async function findLinkByToken(token) {
+  if (!models?.Link) return { ok: false, reason: "NO_MODEL" };
+  const { Link } = models;
+
+  // ытаемся угадать поле токена
+  const whereVariants = [
+    { token },
+    { slug: token },
+    { accessToken: token },
+  ];
+
+  for (const where of whereVariants) {
+    try {
+      const link = await Link.findOne({ where });
+      if (link) return { ok: true, link };
+    } catch (e) { /* пробуем дальше */ }
+  }
+
+  return { ok: false, reason: "NOT_FOUND" };
+}
+
+/**
+ * ыполняет проверки доступа: срок, лимит открытий.
+ * оддерживает разные имена полей.
+ * озвращает { ok, reason? }
+ */
+function checkAccess(linkInstance) {
+  try {
+    const link = linkInstance?.get ? linkInstance.get() : linkInstance;
+
+    // 1) Срок годности
+    const expiresAt = link.expiresAt || link.expireAt || link.expires || null;
+    if (expiresAt) {
+      const exp = new Date(expiresAt).getTime();
+      if (!Number.isNaN(exp) && Date.now() > exp) {
+        return { ok: false, reason: "EXPIRED" };
+      }
+    }
+
+    // 2) имит открытий
+    const maxOpens = link.maxOpens ?? link.openLimit ?? null;
+    const opensCount = link.opensCount ?? link.openCount ?? 0;
+
+    if (maxOpens != null && Number.isFinite(Number(maxOpens))) {
+      if (Number(opensCount) >= Number(maxOpens)) {
+        return { ok: false, reason: "OPEN_LIMIT_REACHED" };
+      }
+    }
+
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: "CHECK_ERROR" };
+  }
+}
+
+/**
+ * нкрементирует счётчик открытий, если поле существует.
+ * елает best‑effort: в противном случае молча пропускает.
+ */
+async function bumpOpenCounter(linkInstance) {
+  if (!linkInstance) return;
+  try {
+    const hasOpensCount = Object.prototype.hasOwnProperty.call(linkInstance, "opensCount");
+    if (hasOpensCount) {
+      linkInstance.opensCount = Number(linkInstance.opensCount || 0) + 1;
+      await linkInstance.save();
+      return;
+    }
+    // ные варианты имён
+    for (const field of ["openCount", "views", "opens"]) {
+      if (Object.prototype.hasOwnProperty.call(linkInstance, field)) {
+        linkInstance[field] = Number(linkInstance[field] || 0) + 1;
+        await linkInstance.save();
+        return;
+      }
+    }
+  } catch (_) {/* no-op */}
+}
+
+/**
+ * ишет событие открытия (если есть модели AccessLog или OpenEvent).
+ */
+async function writeOpenEvent({ req, link, status = "OK", error = null }) {
+  if (!models) return;
+  const ip = ipFromReq(req);
+  const ua = uaFromReq(req);
+
+  const tryCreate = async (ModelName, data) => {
+    const M = models[ModelName];
+    if (!M) return false;
+    try { await M.create(data); return true; } catch (_) { return false; }
+  };
+
+  // ытаемся написать в AccessLog
+  const ok1 = await tryCreate("AccessLog", {
+    linkId: link?.id,
+    token: link?.token || null,
+    ip,
+    userAgent: ua,
+    status,
+    error,
+  });
+
+  // сли нет AccessLog — пробуем OpenEvent
+  if (!ok1) {
+    await tryCreate("OpenEvent", {
+      linkId: link?.id,
+      token: link?.token || null,
+      ip,
+      userAgent: ua,
+      result: status,
+      error,
+    });
+  }
+}
+
+module.exports = {
+  findLinkByToken,
+  checkAccess,
+  bumpOpenCounter,
+  writeOpenEvent,
+};

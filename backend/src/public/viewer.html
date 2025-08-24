@@ -1,0 +1,95 @@
+﻿<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>ащищённый просмотр</title>
+  <style>
+    html,body { margin:0; padding:0; height:100%; background:#111; color:#eee; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    .wrap { position:relative; width:100%; height:100%; overflow:hidden; }
+    .toolbar { position:fixed; top:0; left:0; right:0; height:44px; display:flex; align-items:center; gap:8px; padding:0 12px; background:#151515; border-bottom:1px solid #222; z-index:10; }
+    .title { font-size:14px; opacity:.9; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .content { position:absolute; top:44px; left:0; right:0; bottom:0; overflow:auto; -webkit-user-select:none; user-select:none; }
+    .content img, .content object { pointer-events:none; -webkit-user-drag:none; }
+    .blackout { position:absolute; inset:44px 0 0 0; background:#000; display:none; z-index:20; }
+    .toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); padding:10px 14px; background:#222; color:#fff; border:1px solid #333; border-radius:8px; font-size:13px; display:none; z-index:30; }
+    * { -webkit-user-select: none; user-select: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="app">
+    <div class="toolbar"><div class="title" id="docTitle">агружается…</div></div>
+    <div class="content" id="content"></div>
+    <div class="blackout" id="blackout"></div>
+    <div class="toast" id="toast">Сделан скриншот</div>
+  </div>
+
+<script>
+  const $ = (s)=>document.querySelector(s);
+  const token = (location.pathname.split("/open/")[1]||"").split(/[/?#]/)[0];
+  function getQuery(){ try { return new URLSearchParams(location.search); } catch(_) { return new URLSearchParams(); } }
+  const viewMode = (getQuery().get("mode") || "raster").toLowerCase();
+
+  function getAccess(){ try { return localStorage.getItem("client_access_token") || ""; } catch(_) { return ""; } }
+  async function fetchAuth(url, opts={}) {
+    const h = Object.assign({}, opts.headers||{});
+    const at = getAccess(); if (at && !h.Authorization) h.Authorization="Bearer "+at;
+    return fetch(url,Object.assign({},opts,{headers:h}));
+  }
+
+  function showToast(msg="Сделан скриншот"){ const t=$("#toast"); t.textContent=msg; t.style.display="block"; setTimeout(()=>t.style.display="none",2000); }
+  function blackoutOn(){ $("#blackout").style.display="block"; }
+  function blackoutOff(){ $("#blackout").style.display="none"; }
+  async function reportScreenshot(reason,meta){ try{ await fetchAuth("/open/viewer/screenshot",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token,reason,meta})}); }catch(_){} }
+  function handleScreenshot(reason,meta){ blackoutOn(); showToast(); reportScreenshot(reason,meta); }
+
+  window.addEventListener("contextmenu", e=>e.preventDefault(), {capture:true});
+  window.addEventListener("dragstart", e=>e.preventDefault(), {capture:true});
+  window.addEventListener("copy", e=>e.preventDefault(), {capture:true});
+  window.addEventListener("cut", e=>e.preventDefault(), {capture:true});
+  window.addEventListener("selectstart", e=>e.preventDefault(), {capture:true});
+  window.addEventListener("keydown", e=>{
+    if (e.key==="PrintScreen" || ((e.metaKey||e.ctrlKey)&&["s","p","u"].includes(e.key.toLowerCase()))){
+      e.preventDefault(); e.stopPropagation();
+      handleScreenshot(e.key, {ctrl:e.ctrlKey,meta:e.metaKey});
+    }
+    if (e.metaKey && e.shiftKey && ["3","4","5"].includes(e.key)) {
+      e.preventDefault(); handleScreenshot("mac-screenshot",{});
+    }
+  }, {capture:true});
+  document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden"){handleScreenshot("visibility_hidden",{});} });
+  window.addEventListener("blur", ()=>handleScreenshot("window_blur",{}));
+
+  async function loadData(){
+    const resp=await fetchAuth(`/open/viewer/data/${encodeURIComponent(token)}`); const data=await resp.json();
+    if(!data?.ok){ $("#docTitle").textContent="ет доступа"; return; }
+    $("#docTitle").textContent = data.link?.title || "окумент "+(data.link?.id??"");
+    await loadPages();
+  }
+
+  async function loadPages(){
+    const r=await fetchAuth(`/open/content/pages/${encodeURIComponent(token)}?mode=${encodeURIComponent(viewMode)}`);
+    const j=await r.json(); if(!j?.ok||!Array.isArray(j.pages)) return;
+    const c=$("#content"); c.innerHTML="";
+    for(const p of j.pages){
+      const holder=document.createElement("div"); holder.style.cssText="display:flex;justify-content:center;margin:0 0 12px 0;";
+      if(p.type==="svg"){
+        const obj=document.createElement("object");
+        obj.type="image/svg+xml"; obj.data=p.url;
+        obj.style.cssText="width:100%;max-width:900px;border:none;box-shadow:0 2px 12px rgba(0,0,0,.35);pointer-events:none;";
+        obj.addEventListener("load",()=>{ try{const svgDoc=obj.contentDocument; if(svgDoc&&svgDoc.documentElement){svgDoc.documentElement.style.userSelect="none";svgDoc.documentElement.style.pointerEvents="none";}}catch(_){} });
+        holder.appendChild(obj);
+      } else {
+        const img=document.createElement("img");
+        img.alt=`page ${p.n}`; img.decoding="async"; img.referrerPolicy="no-referrer";
+        img.style.cssText="display:block;width:100%;max-width:900px;box-shadow:0 2px 12px rgba(0,0,0,.35);pointer-events:none;-webkit-user-drag:none;";
+        img.src=p.url; holder.appendChild(img);
+      }
+      c.appendChild(holder);
+    }
+  }
+
+  loadData();
+</script>
+</body>
+</html>

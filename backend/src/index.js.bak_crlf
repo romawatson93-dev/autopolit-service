@@ -1,0 +1,55 @@
+﻿const path = require('path');
+// backend/src/index.js
+
+const express = require("express");
+const cors = require("cors");
+require("dotenv").config({ path: "../.env" });
+
+const sequelize = require("./sequelize");
+const linkController = require("./controllers/linkController");
+
+const userRoutes = require("./routes/userRoutes");
+const linkRoutes = require("./routes/linkRoutes");
+const accessRoutes = require("./routes/accessRoutes");
+
+const app = express();`r`napp.use(express.json());
+
+app.use(cors());
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+// 🔹 оут для открытия ссылки
+app.get('/open/:token', (req, res) => { res.sendFile(path.join(__dirname, 'public', 'viewer.html')); });
+// 🔹 API роуты
+app.use("/api/users", userRoutes);
+app.use("/api/links", linkRoutes);
+app.use("/api/access", accessRoutes);
+
+// 🔹 оуты для клиента (Telegram/web-OTP)
+app.use("/open", accessRoutes);
+
+const PORT = process.env.PORT || 3000;
+
+async function start() {
+  try {
+    await sequelize.authenticate();
+    console.log("✅ одключение к  успешно!");
+
+    await sequelize.sync({ alter: true });
+    console.log("✅ Таблицы синхронизированы!");
+
+    app.get("/ping", (req, res) => {
+      res.json({ message: "pong" });
+    });
+
+    app.use('/open', accessRoutes);\r\nPORT, () => {
+      console.log(`✅ Backend запущен на порту ${PORT}`);
+    });
+  } catch (err) {
+    console.error("❌ шибка подключения к :", err);
+  }
+}
+
+start();
+
+

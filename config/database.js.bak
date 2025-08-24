@@ -1,0 +1,37 @@
+﻿const { Sequelize } = require("sequelize");
+const SKIP_DB = (process.env.SKIP_DB || "true").toLowerCase() === "true";
+let sequelize = null;
+
+if (!SKIP_DB) {
+  const ssl = String(process.env.PGSSL || "false").toLowerCase() === "true"
+    ? { require: true, rejectUnauthorized: false }
+    : false;
+  sequelize = new Sequelize(
+    process.env.PGDATABASE,
+    process.env.PGUSER,
+    process.env.PGPASSWORD,
+    {
+      host: process.env.PGHOST || "localhost",
+      port: Number(process.env.PGPORT || 5432),
+      dialect: "postgres",
+      dialectOptions: ssl ? { ssl } : {},
+      logging: false
+    }
+  );
+}
+
+async function testConnectionIfNeeded() {
+  if (SKIP_DB) {
+    console.log("в„№ SKIP_DB=true вЂ” РїСЂРѕРїСѓСЃРєР°СЋ РїРѕРґРєР»СЋС‡РµРЅРёРµ Рє Р‘Р”");
+    return;
+  }
+  try {
+    await sequelize.authenticate();
+    console.log("вњ” РџРѕРґРєР»СЋС‡РµРЅРёРµ Рє Postgres СѓСЃРїРµС€РЅРѕ");
+  } catch (e) {
+    console.error("вњ– РћС€РёР±РєР° РїРѕРґРєР»СЋС‡РµРЅРёСЏ Рє Postgres:", e.message);
+  }
+}
+module.exports = { sequelize, testConnectionIfNeeded };
+
+

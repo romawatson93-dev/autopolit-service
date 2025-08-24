@@ -1,0 +1,208 @@
+﻿// backend/src/routes/accessRoutes.js
+const express = require("express");
+const router = express.Router();
+
+const { startSession, refreshAccess } = require("../services/sessionService");
+const { verifyInitData } = require("../utils/telegramAuth");
+const requireClientAuth = require("../middleware/requireClientAuth");
+const { writeOpenEvent } = require("../services/linkService");
+
+const path = require("path");
+const fs = require("fs");
+const { ensureRendered, listPages, outDir } = require("../services/renderService");
+
+/* ===== TG AUTH ===== */
+router.get("/tg/dev-initdata", (req, res) => {
+  // dev-only initData mock
+  return res.json({
+    ok: true,
+    initData: JSON.stringify({
+      user: { id: 11111111, username: "demo_user" },
+      auth_date: Date.now(),
+      hash: "fakehash",
+    }),
+  });
+});
+
+router.post("/tg", async (req, res) => {
+  try {
+    const { initData, token } = req.body || {};
+    if (!initData) return res.status(400).json({ ok: false, error: "NO_INIT_DATA" });
+
+    const user = verifyInitData(initData);
+    if (!user) return res.status(401).json({ ok: false, error: "INVALID_INIT" });
+
+    // тут создаём первичный accessToken для клиента
+    const jwt = require("jsonwebtoken");
+    const accessToken = jwt.sign(
+      { sub: `tg:${user.id}`, typ: "client", tg: user },
+      process.env.JWT_SECRET,
+      { expiresIn: "15m" }
+    );
+
+    return res.json({ ok: true, accessToken, tgUser: user });
+  } catch (e) {
+    console.error("POST /tg error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/* ===== CLIENT SESSION ===== */
+router.post("/session/start", requireClientAuth, async (req, res) => {
+  try {
+    const { accessToken, refreshToken } = await startSession(req.user);
+    return res.json({ ok: true, accessToken, refreshToken });
+  } catch (err) {
+    console.error("POST /session/start error:", err);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+router.post("/session/refresh", async (req, res) => {
+  try {
+    const { refreshToken } = req.body || {};
+    const out = await refreshAccess({ refreshToken });
+    if (!out.ok) return res.status(401).json({ ok: false, error: out.error });
+    return res.json({ ok: true, accessToken: out.accessToken });
+  } catch (e) {
+    console.error("POST /session/refresh error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/* ===== Viewer protected data ===== */
+router.get("/viewer/data/:token", requireClientAuth, async (req, res) => {
+  try {
+    const token = req.params.token;
+
+    // TODO: найти ссылку в БД по токену
+    // Пока dev fallback
+    if (process.env.VIEWER_ALLOW_MISSING) {
+      return res.json({
+        ok: true,
+        token,
+        client: {
+          sub: req.user.sub,
+          tg: req.user.tg,
+          linkToken: token,
+        },
+        link: {
+          id: "",
+          title: "(dev mock)",
+          url: "",
+          contentType: "",
+          token,
+        },
+        now: Date.now(),
+        note: "DEV_FALLBACK_NO_LINK",
+      });
+    }
+
+    return res.status(404).json({ ok: false, error: "LINK_NOT_FOUND" });
+  } catch (e) {
+    console.error("GET /viewer/data error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/* ===== Screenshot logging ===== */
+router.post("/viewer/screenshot", requireClientAuth, async (req, res) => {
+  try {
+    const { token, reason = null, meta = null } = req.body || {};
+    try {
+      await writeOpenEvent({
+        req,
+        link: null,
+        status: "SCREENSHOT",
+        error: reason || null,
+      });
+    } catch (e) {
+      console.warn("screenshot log fallback:", e?.message);
+    }
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("POST /viewer/screenshot error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/* ===== Content proxy (real render) ===== */
+const DEFAULT_MODE = (process.env.CONTENT_MODE_DEFAULT || "raster");
+function resolveMode(req) {
+  const q = (req.query?.mode || "").toString().toLowerCase();
+  if (q === "vector" || q === "raster") return q;
+  return DEFAULT_MODE;
+}
+
+router.get("/content/pages/:token", requireClientAuth, async (req, res) => {
+  try {
+    const token = req.params.token;
+    const mode = resolveMode(req);
+
+    const rendered = await ensureRendered(token, mode);
+    if (!rendered.ok) {
+      return res.status(501).json({ ok: false, error: rendered.error });
+    }
+
+    const files = await listPages(token, mode);
+    const pages = files.map((p) => ({
+      n: p.n,
+      type: mode === "vector" ? "svg" : "png",
+      url:
+        mode === "vector"
+          ? `/open/content/page-svg/${encodeURIComponent(token)}/${p.n}`
+          : `/open/content/page-png/${encodeURIComponent(token)}/${p.n}`,
+    }));
+
+    return res.json({ ok: true, token, mode, pages });
+  } catch (e) {
+    console.error("GET /content/pages error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+router.get("/content/page-png/:token/:n", requireClientAuth, async (req, res) => {
+  try {
+    const token = req.params.token;
+    const n = parseInt(req.params.n, 10) || 1;
+    const base = outDir(token, "raster");
+    const file = path.join(base, `${n}.png`);
+    if (!fs.existsSync(file))
+      return res.status(404).json({ ok: false, error: "PAGE_NOT_FOUND" });
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Disposition", 'inline; filename="page.png"');
+    res.setHeader(
+      "Cache-Control",
+      "no-store, no-cache, must-revalidate, proxy-revalidate"
+    );
+    return res.sendFile(file);
+  } catch (e) {
+    console.error("GET /content/page-png error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+router.get("/content/page-svg/:token/:n", requireClientAuth, async (req, res) => {
+  try {
+    const token = req.params.token;
+    const n = parseInt(req.params.n, 10) || 1;
+    const base = outDir(token, "vector");
+    const file = path.join(base, `${n}.svg`);
+    if (!fs.existsSync(file))
+      return res.status(404).json({ ok: false, error: "PAGE_NOT_FOUND" });
+
+    res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+    res.setHeader("Content-Disposition", 'inline; filename="page.svg"');
+    res.setHeader(
+      "Cache-Control",
+      "no-store, no-cache, must-revalidate, proxy-revalidate"
+    );
+    return res.sendFile(file);
+  } catch (e) {
+    console.error("GET /content/page-svg error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+module.exports = router;

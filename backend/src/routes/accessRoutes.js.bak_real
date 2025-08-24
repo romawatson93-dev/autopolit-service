@@ -1,0 +1,241 @@
+﻿// backend/src/routes/accessRoutes.js
+const express = require("express");
+const { verifyTelegramInitData, signInitData } = require("../utils/telegram");
+const { signAccess } = require("../services/jwt");
+const requireClientAuth = require("../middleware/requireClientAuth");
+const { startSession, refreshAccess } = require("../services/sessionService");
+const { findLinkByToken, checkAccess, bumpOpenCounter, writeOpenEvent } = require("../services/linkService");
+
+const router = express.Router();
+
+// ✅ ВКЛЮЧАЕМ явный dev‑fallback:
+// - если NODE_ENV != production ИЛИ VIEWER_ALLOW_MISSING=1, то отдаём мок вместо 404
+const ALLOW_MISSING = (process.env.NODE_ENV !== "production") || (process.env.VIEWER_ALLOW_MISSING === "1");
+
+/**
+ * POST /tg  (монтируется на /open → /open/tg)
+ */
+router.post("/tg", async (req, res) => {
+  try {
+    const { initData, token: linkToken } = req.body || {};
+    const maxAge = Number(process.env.TG_INITDATA_MAX_AGE || 86400);
+    const botToken = process.env.BOT_TOKEN;
+
+    const vr = verifyTelegramInitData(initData, botToken, maxAge);
+    if (!vr.ok) return res.status(401).json({ ok: false, error: vr.reason });
+
+    const tgUser = vr.user || null;
+
+    const accessToken = signAccess({
+      sub: tgUser ? `tg:${tgUser.id}` : null,
+      tg: tgUser ? {
+        id: tgUser.id,
+        username: tgUser.username,
+        first_name: tgUser.first_name,
+        last_name: tgUser.last_name,
+        language_code: tgUser.language_code,
+        is_premium: tgUser.is_premium,
+      } : null,
+      linkToken: linkToken || null,
+    });
+
+    return res.json({ ok: true, accessToken, expiresIn: 900, tgUser });
+  } catch (err) {
+    console.error("POST /tg error:", err);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/**
+ * DEV ONLY: GET /tg/dev-initdata  (итог: /open/tg/dev-initdata)
+ */
+if (process.env.NODE_ENV !== "production") {
+  router.get("/tg/dev-initdata", (req, res) => {
+    try {
+      const botToken = process.env.BOT_TOKEN;
+      if (!botToken) return res.status(400).json({ ok: false, error: "NO_BOT_TOKEN" });
+
+      const now = Math.floor(Date.now() / 1000);
+      const user = {
+        id: Number(req.query.user_id || 11111111),
+        username: req.query.username || "demo_user",
+        first_name: req.query.first_name || "Demo",
+        last_name: req.query.last_name || "",
+        language_code: "en",
+        is_premium: false,
+      };
+
+      const fields = { auth_date: String(now), query_id: req.query.query_id || "AAH_test_query_id", user };
+      const initData = signInitData(fields, botToken);
+      return res.json({ ok: true, initData, note: "Use this initData in POST /open/tg for local testing" });
+    } catch (e) {
+      console.error("GET /tg/dev-initdata error:", e);
+      return res.status(500).json({ ok: false, error: "INTERNAL" });
+    }
+  });
+}
+
+/* ===== Client Session ===== */
+router.post("/session/start", requireClientAuth, async (req, res) => {
+  try {
+    const { refreshToken, accessToken } = await startSession({ req, client: req.client });
+    return res.json({ ok: true, refreshToken, accessToken });
+  } catch (e) {
+    console.error("POST /session/start error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+router.post("/session/refresh", async (req, res) => {
+  try {
+    const { refreshToken } = req.body || {};
+    const out = await refreshAccess({ refreshToken });
+    if (!out.ok) return res.status(401).json({ ok: false, error: out.error });
+    return res.json({ ok: true, accessToken: out.accessToken });
+  } catch (e) {
+    console.error("POST /session/refresh error:", e);
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/* ===== Viewer data (с dev‑fallback) ===== */
+router.get("/viewer/data/:token", requireClientAuth, async (req, res) => {
+  const token = req.params.token;
+  try {
+    const found = await findLinkByToken(token);
+
+    if (!found.ok) {
+      if (ALLOW_MISSING) {
+        return res.json({
+          ok: true,
+          token,
+          client: { sub: req.client?.sub, tg: req.client?.tg, linkToken: req.client?.linkToken },
+          link: { id: null, title: "(dev mock)", url: null, contentType: null, token },
+          now: Date.now(),
+          note: "DEV_FALLBACK_NO_LINK"
+        });
+      }
+      await writeOpenEvent({ req, link: null, status: "NOT_FOUND", error: found.reason });
+      return res.status(404).json({ ok: false, error: "LINK_NOT_FOUND" });
+    }
+
+    const link = found.link;
+
+    const chk = checkAccess(link);
+    if (!chk.ok) {
+      await writeOpenEvent({ req, link, status: "DENY", error: chk.reason });
+      return res.status(403).json({ ok: false, error: chk.reason });
+    }
+
+    await bumpOpenCounter(link);
+    await writeOpenEvent({ req, link, status: "OK" });
+
+    const L = link.get ? link.get() : link;
+    const payload = {
+      id: L.id,
+      title: L.title || L.name || null,
+      url: L.url || L.targetUrl || null,
+      contentType: L.contentType || null,
+      token,
+    };
+
+    return res.json({
+      ok: true,
+      token,
+      client: { sub: req.client?.sub, tg: req.client?.tg, linkToken: req.client?.linkToken },
+      link: payload,
+      now: Date.now(),
+    });
+  } catch (e) {
+    console.error("GET /viewer/data error:", e);
+    try { await writeOpenEvent({ req, link: null, status: "ERROR", error: e.message }); } catch {}
+    return res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+/* ===== Content proxy with modes (raster/vector) =====
+   NOTE: сейчас PNG/SVG заглушки; позже подключим реальный рендер.
+*/
+
+const DEFAULT_MODE = (process.env.CONTENT_MODE_DEFAULT || "raster"); // "raster" | "vector"
+function resolveMode(req){
+  const q = (req.query?.mode || "").toString().toLowerCase();
+  if (q === "vector" || q === "raster") return q;
+  // TODO: тут можно смотреть тариф клиента/ссылки из 
+  return DEFAULT_MODE;
+}
+
+// аглушка PNG (800x1131, серый)
+const PLACEHOLDER_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAA4AAAARzCAYAAAB8k2l0AAAACXBIWXMAAAsSAAALEgHS3X78AAAgAElEQVR4nO3YwQmDQBAF0bT//0fWjgk1S2G3e0pg2Fv1h2wG1Q5vS9g3f8B7m0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABgX8dY8f7wYg9fDk9m2v0K8c9g4r3G8f4jzXo7zv8h3f7H8vQG3T0f1wXkHAAAgIuFJwAAgIuFJwAAgIuFJwAAgIuFJwAAoMv+9v8b8Xo9v4wqAAAAAElFTkSuQmCC",
+  "base64"
+);
+
+// аглушка SVG (векторная страница 800x1131)
+const PLACEHOLDER_SVG = (pageN=1)=>`<?xml version="1.0" encoding="UTF-8"?>
+<svg width="800" height="1131" viewBox="0 0 800 1131" xmlns="http://www.w3.org/2000/svg">
+  <rect width="800" height="1131" fill="#1b1b1b"/>
+  <rect x="24" y="24" width="752" height="1083" rx="12" fill="#2a2a2a" stroke="#3a3a3a"/>
+  <text x="50%" y="80" fill="#d0d0d0" font-size="28" text-anchor="middle" font-family="Segoe UI, Roboto, Arial">екторный просмотр (страница ${pageN})</text>
+  <g transform="translate(52,130)" fill="#bdbdbd" font-size="14" font-family="Consolas, Menlo, ui-monospace">
+    <text y="0">• то SVG-заглушка. еальный рендер PDF→SVG подключим позже.</text>
+    <text y="24">• асштабирование без потери качества (преимущество премиум-подписки).</text>
+    <text y="48">• Скачивание/копирование отключено на уровне Viewer.</text>
+  </g>
+</svg>`;
+
+router.get("/content/pages/:token", requireClientAuth, async (req, res) => {
+  try {
+    const token = req.params.token;
+    const mode = resolveMode(req); // "raster" | "vector"
+
+    // TODO: проверить ссылку/лимиты в ; определить количество страниц
+    const pagesCount = 1; // заглушка
+
+    const pages = [];
+    for (let n=1; n<=pagesCount; n++){
+      if (mode === "vector") {
+        pages.push({ n, type: "svg", w: 800, h: 1131, url: `/open/content/page-svg/${encodeURIComponent(token)}/${n}` });
+      } else {
+        pages.push({ n, type: "png", w: 800, h: 1131, url: `/open/content/page-png/${encodeURIComponent(token)}/${n}` });
+      }
+    }
+    res.json({ ok: true, token, mode, pages });
+  } catch (e) {
+    console.error("GET /content/pages error:", e);
+    res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+// PNG страница (растер)
+router.get("/content/page-png/:token/:n", requireClientAuth, async (req, res) => {
+  try {
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Content-Disposition", "inline; filename=\"page.png\"");
+    res.end(PLACEHOLDER_PNG);
+  } catch (e) {
+    console.error("GET /content/page-png error:", e);
+    res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+
+// SVG страница (вектор)
+router.get("/content/page-svg/:token/:n", requireClientAuth, async (req, res) => {
+  try {
+    const n = Number(req.params.n||1);
+    const svg = PLACEHOLDER_SVG(n);
+    res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Content-Disposition", "inline; filename=\"page.svg\"");
+    res.end(svg, "utf8");
+  } catch (e) {
+    console.error("GET /content/page-svg error:", e);
+    res.status(500).json({ ok: false, error: "INTERNAL" });
+  }
+});
+module.exports = router;
