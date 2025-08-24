@@ -1,7 +1,6 @@
 // C:\Users\Life PC\Documents\autopolit-service\backend\src\sequelize.js
 
 const { Sequelize } = require('sequelize');
-require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 
 // создаём подключение
 const sequelize = new Sequelize(
@@ -17,4 +16,3 @@ const sequelize = new Sequelize(
 );
 
 module.exports = sequelize;
-

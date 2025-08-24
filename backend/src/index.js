@@ -1,47 +1,38 @@
-﻿// C:\Users\Life PC\Documents\autopolit-service\backend\src\index.js
+﻿const morgan = require("morgan");
 
-const linkController = require("./controllers/linkController");
-const express = require('express');
-const cors = require('cors');
-const sequelize = require('./sequelize'); // здесь сам объект Sequelize
-require('dotenv').config({ path: '../.env' });
+const { testConnectionIfNeeded } = require("./config/database");
+const accessRoutes = require("./routes/accessRoutes");
 
-const userRoutes = require('./routes/userRoutes'); // 🔹 роуты пользователей
-const linkRoutes = require('./routes/linkRoutes'); // 🔹 роуты ссылок
-const accessRoutes = require('./routes/accessRoutes'); // 🔹 роуты доступа
-
-const app = express(); // ✅ сначала создаём приложение
-
-app.get("/open/:token", linkController.openAndRedirect);
-app.use(cors());
-app.use(express.json());
-
-// 🔹 Регистрируем все роуты
-app.use('/api/users', userRoutes);
-app.use('/api/links', linkRoutes);
-app.use('/api/access', accessRoutes);
-
+const app = express();
 const PORT = process.env.PORT || 3000;
 
-async function start() {
-  try {
-    await sequelize.authenticate();
-    console.log('✅ Подключение к БД успешно!');
+app.use(helmet());
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true }));
+app.use(morgan("dev"));
 
-    await sequelize.sync({ alter: true });
-    console.log('✅ Таблицы синхронизированы!');
+app.get("/ping", (_req, res) => res.json({ ok: true, t: Date.now() }));
+app.use(accessRoutes);
 
-    // 🔹 Тестовый маршрут
-    app.get('/ping', (req, res) => {
-      res.json({ message: 'pong' });
-    });
+app.use((err, _req, res, _next) => {
+  console.error("Unhandled error:", err);
+  res.status(err.status || 500).json({ ok: false, error: err.message || "Internal error" });
+});
 
-    app.listen(PORT, () => {
-      console.log(`✅ Backend запущен на порту ${PORT}`);
-    });
-  } catch (err) {
-    console.error('❌ Ошибка подключения к БД:', err);
-  }
-}
-
-start();
+(async () => {
+  await testConnectionIfNeeded();
+  app.listen(PORT, () => {
+    console.log("Сервер запущен на порту " + PORT);
+    console.log("GET    /ping");
+    console.log("GET    /tg/dev-initdata");
+    console.log("POST   /tg");
+    console.log("POST   /session/start");
+    console.log("POST   /session/refresh");
+    console.log("GET    /viewer/data/:token");
+    console.log("GET    /content/pages/:token");
+    console.log("GET    /content/page-svg/:token/:n");
+    console.log("GET    /content/page-png/:token/:n (501 пока)");
+    console.log("POST   /viewer/screenshot");
+  });
+})();

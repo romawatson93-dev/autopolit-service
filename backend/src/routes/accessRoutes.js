@@ -1,14 +1,20 @@
-const express = require('express');
-const router = express.Router();
-const accessController = require('../controllers/accessController');
+const express=require("express");const router=express.Router();
+const {verifyInitData,makeDevInitData,parseInitData}=require("../utils/telegramAuth");
+const requireClientAuth=require("../middleware/requireClientAuth");
+const {createSession,refreshSession,getViewerData}=require("../services/sessionService");
+const {ensureRendered,listPages,makeSvg}=require("../services/renderService");
+const BOT_TOKEN=process.env.TELEGRAM_BOT_TOKEN;
+const ALLOW_DEV=(process.env.ALLOW_DEV_INITDATA||"false").toLowerCase()==="true";
+const INITDATA_TTL_SECONDS=Number(process.env.INITDATA_TTL_SECONDS||86400);
 
-// 🔹 Открыть ссылку через Telegram WebApp
-router.post('/open/tg', accessController.openViaTelegram);
-
-// 🔹 Fallback: запросить SMS-код
-router.post('/open/send-otp', accessController.sendOtp);
-
-// 🔹 Fallback: подтвердить SMS-код
-router.post('/open/verify-otp', accessController.verifyOtp);
-
-module.exports = router;
+router.get("/tg/dev-initdata",(_q,r)=>ALLOW_DEV?r.json({ok:true,initData:makeDevInitData()}):r.status(403).json({ok:false,error:"dev_disabled"}));
+router.post("/tg",(q,r)=>{try{const {initData}=q.body||{};if(!initData)return r.status(400).json({ok:false,error:"no_init"});if(ALLOW_DEV){const p=parseInitData(initData);if(p.hash==="FAKEHASH_DEV_ONLY"){const s=p.user?.id||"dev";return r.json({ok:true,sub:s,...createSession(s)});}}
+const v=verifyInitData(initData,BOT_TOKEN,INITDATA_TTL_SECONDS);if(!v.ok)return r.status(401).json({ok:false,error:v.reason});const s=v.data.user?.id||"unknown";r.json({ok:true,sub:s,...createSession(s)});}catch(e){r.status(500).json({ok:false,error:e.message});}});
+router.post("/session/start",requireClientAuth,(q,r)=>{const {sub}=q.user;r.json({ok:true,refreshToken:createSession(sub).refreshToken});});
+router.post("/session/refresh",(q,r)=>{const {refreshToken}=q.body||{};if(!refreshToken)return r.status(400).json({ok:false,error:"no_refresh"});try{r.json({ok:true,...refreshSession(refreshToken)});}catch(e){r.status(e.status||500).json({ok:false,error:e.message});}});
+router.get("/viewer/data/:token",requireClientAuth,(q,r)=>{const {sub}=q.user;r.json({ok:true,sub,data:getViewerData(sub),token:q.params.token});});
+router.get("/content/pages/:token",requireClientAuth,(q,r)=>{ensureRendered(q.params.token);r.json({ok:true,pages:listPages(q.params.token)});});
+router.get("/content/page-svg/:token/:n",requireClientAuth,(q,r)=>{const n=Number(q.params.n||1);r.type("image/svg+xml").send(makeSvg(n,q.user?.sub));});
+router.get("/content/page-png/:token/:n",requireClientAuth,(_q,r)=>r.status(501).json({ok:false,error:"png_not_implemented"}));
+router.post("/viewer/screenshot",requireClientAuth,(q,r)=>{console.log("screenshot",q.body);r.json({ok:true});});
+module.exports=router;
