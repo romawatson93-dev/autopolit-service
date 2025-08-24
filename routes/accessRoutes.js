@@ -1,20 +1,116 @@
-﻿const express=require("express");const router=express.Router();
-const {verifyInitData,makeDevInitData,parseInitData}=require("../utils/telegramAuth");
-const requireClientAuth=require("../middleware/requireClientAuth");
-const {createSession,refreshSession,getViewerData}=require("../services/sessionService");
-const {ensureRendered,listPages,makeSvg}=require("../services/renderService");
-const BOT_TOKEN=process.env.TELEGRAM_BOT_TOKEN;
-const ALLOW_DEV=(process.env.ALLOW_DEV_INITDATA||"false").toLowerCase()==="true";
-const INITDATA_TTL_SECONDS=Number(process.env.INITDATA_TTL_SECONDS||86400);
+﻿const express = require("express");
+const router = express.Router();
 
-router.get("/tg/dev-initdata",(_q,r)=>ALLOW_DEV?r.json({ok:true,initData:makeDevInitData()}):r.status(403).json({ok:false,error:"dev_disabled"}));
-router.post("/tg",(q,r)=>{try{const {initData}=q.body||{};if(!initData)return r.status(400).json({ok:false,error:"no_init"});if(ALLOW_DEV){const p=parseInitData(initData);if(p.hash==="FAKEHASH_DEV_ONLY"){const s=p.user?.id||"dev";return r.json({ok:true,sub:s,...createSession(s)});}}
-const v=verifyInitData(initData,BOT_TOKEN,INITDATA_TTL_SECONDS);if(!v.ok)return r.status(401).json({ok:false,error:v.reason});const s=v.data.user?.id||"unknown";r.json({ok:true,sub:s,...createSession(s)});}catch(e){r.status(500).json({ok:false,error:e.message});}});
-router.post("/session/start",requireClientAuth,(q,r)=>{const {sub}=q.user;r.json({ok:true,refreshToken: createSession(sub).refreshToken});});
-router.post("/session/refresh",(q,r)=>{const {refreshToken}=q.body||{};if(!refreshToken)return r.status(400).json({ok:false,error:"no_refresh"});try{r.json({ok:true,...refreshSession(refreshToken)});}catch(e){r.status(e.status||500).json({ok:false,error:e.message});}});
-router.get("/viewer/data/:token",requireClientAuth,(q,r)=>{const {sub}=q.user;r.json({ok:true,sub,data:getViewerData(sub),token:q.params.token});});
-router.get("/content/pages/:token",requireClientAuth,(q,r)=>{ensureRendered(q.params.token);r.json({ok:true,pages:listPages(q.params.token)});});
-router.get("/content/page-svg/:token/:n",requireClientAuth,(q,r)=>{const n=Number(q.params.n||1);r.type("image/svg+xml").send(makeSvg(n,q.user?.sub));});
-router.get("/content/page-png/:token/:n",requireClientAuth,(_q,r)=>r.status(501).json({ok:false,error:"png_not_implemented"}));
-router.post("/viewer/screenshot",requireClientAuth,(q,r)=>{console.log("screenshot",q.body);r.json({ok:true});});
-module.exports=router;
+const { verifyInitData, makeDevInitData, parseInitData } = require("../utils/telegramAuth");
+const requireClientAuth = require("../middleware/requireClientAuth");
+const { createSession, refreshSession, revokeRefreshToken, revokeAllForUser, getViewerData } = require("../services/sessionService");
+const { SKIP_DB, loadModels } = require("../config/database");
+
+const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
+const ALLOW_DEV = (process.env.ALLOW_DEV_INITDATA || "true").toLowerCase() === "true";
+const INITDATA_TTL_SECONDS = Number(process.env.INITDATA_TTL_SECONDS || 86400);
+
+// Dev initData
+router.get("/tg/dev-initdata", (_q, r) =>
+  ALLOW_DEV ? r.json({ ok: true, initData: makeDevInitData() }) : r.status(403).json({ ok: false, error: "dev_disabled" })
+);
+
+async function upsertUserFromInitData(userObj) {
+  if (SKIP_DB) return;
+  const { User } = loadModels();
+  if (!User) return;
+  const payload = {
+    id: userObj.id,
+    username: userObj.username || null,
+    first_name: userObj.first_name || null,
+    last_name: userObj.last_name || null,
+    language_code: userObj.language_code || null
+  };
+  const existing = await User.findByPk(payload.id);
+  if (existing) return existing.update(payload);
+  return User.create(payload);
+}
+
+router.post("/tg", async (q, r) => {
+  try {
+    const { initData } = q.body || {};
+    if (!initData) return r.status(400).json({ ok: false, error: "no_init" });
+
+    // dev-ветка без подписи
+    if (ALLOW_DEV) {
+      const parsed = parseInitData(initData);
+      if (parsed.hash === "FAKEHASH_DEV_ONLY") {
+        const sub = parsed.user?.id || "dev";
+        if (parsed.user) await upsertUserFromInitData(parsed.user).catch(() => {});
+        const session = await createSession(sub, { userAgent: q.headers["user-agent"], ip: q.ip });
+        return r.json({ ok: true, sub, ...session });
+      }
+    }
+
+    // нормальная валидация подписи Telegram
+    const v = verifyInitData(initData, BOT_TOKEN, INITDATA_TTL_SECONDS);
+    if (!v.ok) return r.status(401).json({ ok: false, error: v.reason });
+
+    const sub = v.data.user?.id || "unknown";
+    if (v.data.user) await upsertUserFromInitData(v.data.user).catch(() => {});
+    const session = await createSession(sub, { userAgent: q.headers["user-agent"], ip: q.ip });
+    return r.json({ ok: true, sub, ...session });
+  } catch (e) {
+    return r.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Старт сессии (выдать refreshToken по access-токену)
+router.post("/session/start", requireClientAuth, async (q, r) => {
+  const { sub } = q.user;
+  const session = await createSession(sub, { userAgent: q.headers["user-agent"], ip: q.ip });
+  return r.json({ ok: true, refreshToken: session.refreshToken });
+});
+
+// Обновить access-токен по refreshToken
+router.post("/session/refresh", async (q, r) => {
+  const { refreshToken } = q.body || {};
+  if (!refreshToken) return r.status(400).json({ ok: false, error: "no_refresh" });
+  try {
+    const out = await refreshSession(refreshToken);
+    return r.json({ ok: true, ...out });
+  } catch (e) {
+    return r.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+// Текущий пользователь (по accessToken)
+router.get("/me", requireClientAuth, async (q, r) => {
+  const { sub } = q.user;
+  if (SKIP_DB) return r.json({ ok: true, user: { id: sub } });
+
+  try {
+    const { User } = loadModels();
+    const user = await (User ? User.findByPk(sub) : null);
+    return r.json({ ok: true, user: user ? user.toJSON() : { id: sub } });
+  } catch (e) {
+    return r.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Логаут: отозвать ОДИН refreshToken
+router.delete("/session", async (q, r) => {
+  const { refreshToken } = q.body || {};
+  if (!refreshToken) return r.status(400).json({ ok: false, error: "no_refresh" });
+  await revokeRefreshToken(refreshToken);
+  return r.json({ ok: true });
+});
+
+// Логаут везде: отозвать ВСЕ refreshToken пользователя
+router.delete("/sessions", requireClientAuth, async (q, r) => {
+  await revokeAllForUser(q.user.sub);
+  return r.json({ ok: true });
+});
+
+// Пример данных для viewer
+router.get("/viewer/data/:token", requireClientAuth, (q, r) => {
+  const { sub } = q.user;
+  return r.json({ ok: true, sub, data: getViewerData(sub), token: q.params.token });
+});
+
+module.exports = router;

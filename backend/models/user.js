@@ -5,13 +5,10 @@ const bcrypt = require('bcrypt');
 module.exports = (sequelize, DataTypes) => {
   class User extends Model {
     static associate(models) {
-      // Тут можно будет связать с другими таблицами
-    }
+  // У пользователя много сессий
+  this.hasMany(models.Session, { foreignKey: 'userId', onDelete: 'CASCADE' });
+}
 
-    // Метод для проверки пароля при логине
-    async validPassword(password) {
-      return await bcrypt.compare(password, this.password);
-    }
   }
 
   User.init(

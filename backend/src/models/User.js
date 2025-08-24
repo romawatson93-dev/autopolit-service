@@ -1,12 +1,20 @@
-// C:\Users\Life PC\Documents\autopolit-service\backend\src\models\User.js
+// models/User.js
 const { DataTypes } = require("sequelize");
-const sequelize = require("../sequelize");
 
-const User = sequelize.define("User", {
-  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-  name: { type: DataTypes.STRING, allowNull: false },
-  phone: { type: DataTypes.STRING, unique: true, allowNull: false },
-  role: { type: DataTypes.ENUM("contractor", "client"), allowNull: false }
-});
+module.exports = (sequelize) => {
+  const User = sequelize.define("User", {
+    id: {
+      type: DataTypes.BIGINT, // Telegram user id может быть большим
+      primaryKey: true
+    },
+    username: { type: DataTypes.STRING, allowNull: true },
+    first_name: { type: DataTypes.STRING, allowNull: true },
+    last_name: { type: DataTypes.STRING, allowNull: true },
+    language_code: { type: DataTypes.STRING(8), allowNull: true }
+  }, {
+    tableName: "users",
+    timestamps: true
+  });
 
-module.exports = User;
+  return User;
+};
